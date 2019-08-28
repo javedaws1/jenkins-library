@@ -1,3 +1,5 @@
+import com.sap.piper.k8s.ContainerUtils
+
 import static com.sap.piper.Prerequisites.checkScript
 
 import com.sap.piper.ConfigurationHelper
@@ -77,6 +79,14 @@ import hudson.AbortException
      * Specifies a dedicated user home directory for the container which will be passed as value for environment variable `HOME`.
      */
     'dockerWorkspace',
+
+    'sidecarImage',
+    'sidecarName',
+    'sidecarPullImage',
+    'sidecarReadyCommand',
+    'sidecarEnvVars',
+
+
     /** Defines the Kubernetes nodeSelector as per [https://github.com/jenkinsci/kubernetes-plugin](https://github.com/jenkinsci/kubernetes-plugin).*/
     'nodeSelector',
     /**
@@ -130,6 +140,8 @@ import hudson.AbortException
 void call(Map parameters = [:], body) {
     handlePipelineStepErrors(stepName: STEP_NAME, stepParameters: parameters, failOnError: true) {
 
+        println("DEBUG: In DockerExecuteOnK8s")
+
         final script = checkScript(this, parameters) ?: this
 
         if (!JenkinsUtils.isPluginActive(PLUGIN_ID_KUBERNETES)) {
@@ -160,6 +172,7 @@ void call(Map parameters = [:], body) {
             config.containerCommands = config.containerCommand ? [(config.get('dockerImage')): config.containerCommand] : null
         }
         executeOnPod(config, utils, body)
+        println("DEBUG: Leaving DockerExecuteOnK8s")
     }
 }
 
@@ -201,6 +214,9 @@ void executeOnPod(Map config, utils, Closure body) {
         }
         podTemplate(getOptions(config)) {
             node(config.uniqueId) {
+                if(config.sidecarReadyCommand) {
+                    ContainerUtils.waitForSidecarReadyOnKubernetes(config.sidecarName, config.sidecarReadyCommand)
+                }
                 if (config.containerName) {
                     Map containerParams = [name: config.containerName]
                     if (config.containerShell) {
@@ -272,7 +288,6 @@ chown -R ${runAsUser}:${fsGroup} ."""
         )
         //inactive due to negative side-effects, we may require a dedicated git stash to be used
         //useDefaultExcludes: false)
-
         return stashName
     } catch (AbortException | IOException e) {
         echo "${e.getMessage()}"
@@ -296,7 +311,7 @@ private List getContainerList(config) {
 
     //If no custom jnlp agent provided as default jnlp agent (jenkins/jnlp-slave) as defined in the plugin, see https://github.com/jenkinsci/kubernetes-plugin#pipeline-support
     def result = []
-
+    println("DEBUG: in getContainerList. Config: ${config.toString()}")
     //allow definition of jnlp image via environment variable JENKINS_JNLP_IMAGE in the Kubernetes landscape or via config as fallback
     if (env.JENKINS_JNLP_IMAGE || config.jenkinsKubernetes.jnlpAgent) {
         result.push([
@@ -305,6 +320,7 @@ private List getContainerList(config) {
         ])
     }
     config.containerMap.each { imageName, containerName ->
+        println("DEBUG: build containerlist for $imageName $containerName ")
         def containerPullImage = config.containerPullImageFlags?.get(imageName)
         def containerSpec = [
             name: containerName.toLowerCase(),
@@ -345,8 +361,30 @@ private List getContainerList(config) {
             }
             containerSpec.ports = ports
         }
+        println("DEBUG: containerspec to be pushed: ${containerSpec.toString()}")
         result.push(containerSpec)
     }
+    if (config.sidecarImage) {
+        println("DEBUG: sidecar config recognized")
+        def containerSpec = [
+            name: config.sidecarName.toLowerCase(),
+            image: config.sidecarImage,
+            imagePullPolicy: config.sidecarPullImage ? "Always" : "IfNotPresent",
+            env: getContainerEnvs(config, config.sidecarImage),
+            command: []
+        ]
+        List ports = []
+        def port = config.sidecarEnvVars.find() {
+            it.key.toLowerCase() == 'port'
+        }
+        if (port) {
+            ports.add([name: config.sidecarName.toLowerCase(), containerPort: port.value])
+            containerSpec.ports = ports
+        }
+        println("DEBUG: container spec sidecar: ${containerSpec.toString()}")
+        result.push(containerSpec)
+    }
+    println("DEBUG: result containerlist: ${result.toString()}")
     return result
 }
 
